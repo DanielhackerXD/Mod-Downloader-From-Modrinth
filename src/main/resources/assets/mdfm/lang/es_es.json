@@ -1,0 +1,12 @@
+{
+  "screen.mdfm.title": "Configuracion del modpack",
+  "screen.mdfm.intro": "Para poder jugar a este modpack, los siguientes mods se instalaran automaticamente en tu carpeta mods desde Modrinth. Pulsa Next para continuar.",
+  "screen.mdfm.next": "Next",
+  "screen.mdfm.downloading": "Descargando mods, por favor espera...",
+  "screen.mdfm.restart_required.success": "Todos los mods se han instalado correctamente.",
+  "screen.mdfm.restart_required.instructions": "Cierra el juego y vuelve a abrirlo para que se carguen los nuevos mods.",
+  "screen.mdfm.error.failed_count": "No se han podido descargar %s mod(s). Revisa tu conexion e intentalo de nuevo.",
+  "screen.mdfm.error.select_all": "Debes instalar todos los mods listados para que el juego funcione correctamente.",
+  "screen.mdfm.exit_game": "Salir del juego",
+  "screen.mdfm.retry": "Reintentar"
+}

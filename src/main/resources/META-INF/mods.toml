@@ -1,0 +1,30 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="All Rights Reserved"
+issueTrackerURL=""
+
+[[mods]]
+modId="mdfm"
+version="1.0.0"
+displayName="MDFM (Mod Downloader From Modrinth)"
+authors="DanielhackerXD"
+description='''
+On first launch, shows a mandatory screen informing the player that
+certain mods will automatically be downloaded into their mods folder
+from Modrinth. The player must accept to continue; if a download fails,
+the player is warned and cannot proceed until it is resolved.
+'''
+
+[[dependencies.mdfm]]
+    modId="forge"
+    mandatory=true
+    versionRange="[47,)"
+    ordering="NONE"
+    side="CLIENT"
+
+[[dependencies.mdfm]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.20.1,1.21)"
+    ordering="NONE"
+    side="CLIENT"
