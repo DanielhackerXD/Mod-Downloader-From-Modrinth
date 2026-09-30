@@ -20,6 +20,7 @@ import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -28,12 +29,31 @@ public class ModDownloader {
 
     private static final Logger LOGGER = LogManager.getLogger("MDFM");
 
-
+    // Magic bytes of a valid ZIP/JAR file: 'P' 'K' 0x03 0x04
+    // (there are also PK\x05\x06 and PK\x07\x08 variants for empty or
+    // multi-volume zips, but a normal jar always starts with PK\x03\x04).
     private static final byte[] ZIP_MAGIC = {0x50, 0x4B, 0x03, 0x04};
 
-
+    // Matches Modrinth PAGE links such as:
+    //   https://modrinth.com/mod/entityculling/version/MloBcsQQ
+    //   https://modrinth.com/mod/appleskin/version/2.5.1+mc1.20.1
+    // Group 1 = project slug, group 2 = version identifier, which can be
+    // either the real Modrinth version id (e.g. "MloBcsQQ") or the
+    // human-readable version_number (e.g. "2.5.1+mc1.20.1") - Modrinth's
+    // website accepts both in the URL, but only the real id works directly
+    // against the /v2/version/{id} API endpoint. See resolveModrinthUrl.
     private static final Pattern MODRINTH_VERSION_PAGE =
             Pattern.compile("^https?://modrinth\\.com/[^/]+/([^/]+)/version/([^/?#]+)/?$");
+
+    // SECURITY: the only hosts a final download request is ever allowed to
+    // go to. This applies to the fully-resolved URL, not just the
+    // mods.json entry, so a page link that resolves somewhere unexpected
+    // is caught too. Without this check, a mods.json pointing to an
+    // arbitrary URL would have been downloaded and loaded as a mod jar
+    // with no restriction at all - this allowlist is what prevents that.
+    private static final Set<String> ALLOWED_DOWNLOAD_HOSTS = Set.of(
+            "cdn.modrinth.com"
+    );
 
     private static final Path MODS_DIR = FMLPaths.MODSDIR.get();
 
@@ -42,11 +62,16 @@ public class ModDownloader {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
 
-
+    // Modrinth's public API is generous, but retrying a couple of times on a
+    // rate limit still turns a transient hiccup into a short wait instead of
+    // a hard failure.
     private static final int RATE_LIMIT_MAX_RETRIES = 3;
     private static final long RATE_LIMIT_BASE_DELAY_MS = 4000;
 
-
+    /**
+     * Checks, without downloading anything, whether the files in the list
+     * are already present in the mods/ folder.
+     */
     public static boolean isAlreadyInstalled(ModEntry entry) {
         return Files.exists(MODS_DIR.resolve(entry.fileName));
     }
@@ -60,7 +85,11 @@ public class ModDownloader {
         return true;
     }
 
-
+    /**
+     * Downloads all selected mods sequentially, on a background thread.
+     * Calls onEntryUpdate every time a ModEntry's status changes, and
+     * onFinished when done with the list of failures (empty if everything succeeded).
+     */
     public static void downloadAllAsync(List<ModEntry> entries,
                                          Consumer<ModEntry> onEntryUpdate,
                                          Consumer<List<ModEntry>> onFinished) {
@@ -113,10 +142,31 @@ public class ModDownloader {
         try {
             String actualUrl = resolveActualDownloadUrl(entry.url);
 
+            // SECURITY: refuse to download from anything outside the
+            // allowlisted Modrinth CDN host, regardless of what was
+            // configured in mods.json or what a page link resolved to.
+            if (!isAllowedDownloadHost(actualUrl)) {
+                LOGGER.warn("[{}] refusing to download: '{}' is not an allowed host (only {} is permitted). " +
+                        "mods.json entries must be modrinth.com page links or direct cdn.modrinth.com links.",
+                        entry.fileName, actualUrl, ALLOWED_DOWNLOAD_HOSTS);
+                return false;
+            }
+
+            // Extra safety net on top of the host allowlist above: cross-check
+            // against the public StopModReposts database of sites known to
+            // illegally re-host mods. Given the allowlist already restricts
+            // downloads to cdn.modrinth.com, this mainly matters as
+            // defense-in-depth rather than as the primary protection.
+            if (RepostBlocklist.isFlagged(actualUrl)) {
+                LOGGER.warn("[{}] refusing to download: '{}' is flagged in the StopModReposts database " +
+                        "(https://stopmodreposts.org) as a known illegal mod repost site.", entry.fileName, actualUrl);
+                return false;
+            }
+
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(actualUrl))
                     .timeout(Duration.ofMinutes(5))
-                    .header("User-Agent", "ModpackDownloader/1.0 (Minecraft Forge 1.20.1)")
+                    .header("User-Agent", "MDFM/1.0 (Minecraft Forge 1.20.1)")
                     .GET()
                     .build();
 
@@ -133,7 +183,9 @@ public class ModDownloader {
                 return false;
             }
 
-
+            // If the server says this is HTML, the URL almost certainly
+            // points to a page instead of the direct .jar file. Bail out
+            // before wasting bandwidth.
             Optional<String> contentType = response.headers().firstValue("Content-Type");
             if (contentType.isPresent() && contentType.get().toLowerCase().contains("text/html")) {
                 LOGGER.warn("[{}] the configured URL returned HTML instead of a file. " +
@@ -146,7 +198,7 @@ public class ModDownloader {
                 Files.copy(in, tempFile, StandardCopyOption.REPLACE_EXISTING);
             }
 
-
+            // Check 1: reasonable minimum size.
             if (Files.size(tempFile) < 1024) {
                 LOGGER.warn("[{}] downloaded file is too small ({} bytes), likely an error page.",
                         entry.fileName, Files.size(tempFile));
@@ -154,11 +206,24 @@ public class ModDownloader {
                 return false;
             }
 
-
+            // Check 2 (the important one): a .jar is a .zip under the hood,
+            // so its first 4 bytes must be the PK\x03\x04 signature. If
+            // they aren't, what was downloaded is not a valid jar (usually
+            // it's HTML from an intermediate download page) and Forge
+            // would reject it with "unknown format or damaged file".
             if (!hasValidZipSignature(tempFile)) {
                 LOGGER.warn("[{}] the downloaded file is not a valid ZIP/JAR (wrong signature). " +
                         "Check that the URL in mods.json is the direct download link for the .jar: {}",
                         entry.fileName, entry.url);
+                Files.deleteIfExists(tempFile);
+                return false;
+            }
+
+            // Check 3 (optional): if mods.json declared an expected hash for
+            // this mod, the downloaded bytes must match it exactly. Unlike
+            // checks 1/2, which only confirm "this is *a* valid jar", this
+            // confirms it's the *specific* file the pack author intended.
+            if (!verifyExpectedHashes(entry, tempFile)) {
                 Files.deleteIfExists(tempFile);
                 return false;
             }
@@ -175,7 +240,28 @@ public class ModDownloader {
         }
     }
 
+    /**
+     * SECURITY: returns true only if the given URL's host is exactly one of
+     * ALLOWED_DOWNLOAD_HOSTS. This is checked against the fully-resolved
+     * download URL (after any Modrinth page resolution), so there is no way
+     * for a mods.json entry - whether a page link or a "direct" link - to
+     * cause a download from anywhere outside Modrinth's own CDN.
+     */
+    private static boolean isAllowedDownloadHost(String url) {
+        try {
+            String host = URI.create(url).getHost();
+            return host != null && ALLOWED_DOWNLOAD_HOSTS.contains(host.toLowerCase());
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
+    /**
+     * Sends a request, automatically retrying with a short backoff if the
+     * response is HTTP 429 (rate limited). Returns the last response
+     * received either way (a non-429 response, or the final 429 after
+     * exhausting retries).
+     */
     private static <T> HttpResponse<T> sendWithRateLimitRetry(HttpRequest request, HttpResponse.BodyHandler<T> bodyHandler,
                                                                 String description) throws IOException, InterruptedException {
         HttpResponse<T> response = CLIENT.send(request, bodyHandler);
@@ -191,7 +277,13 @@ public class ModDownloader {
         return response;
     }
 
-
+    /**
+     * If the URL configured by the pack author is a Modrinth version page,
+     * resolves it into the real direct download link via Modrinth's public
+     * API. Otherwise (already a direct link), the URL is used unchanged -
+     * downloadOne() enforces the host allowlist afterwards either way, so
+     * this method itself doesn't need to validate anything.
+     */
     private static String resolveActualDownloadUrl(String originalUrl) {
         Matcher modrinthMatcher = MODRINTH_VERSION_PAGE.matcher(originalUrl);
         if (modrinthMatcher.matches()) {
@@ -200,13 +292,24 @@ public class ModDownloader {
         return originalUrl;
     }
 
-
+    /**
+     * Resolves a Modrinth version page through its public API to get the
+     * file's real CDN link. First tries treating the identifier as a real
+     * Modrinth version id (the common case). If that fails with a 400 (the
+     * identifier isn't a valid id - typically because it's actually a
+     * human-readable version_number, e.g. "2.5.1+mc1.20.1"), falls back to
+     * listing the project's versions and matching by version_number.
+     * Falls back to the original URL if everything about this fails (the
+     * host allowlist check and/or the ZIP signature check will then catch
+     * the problem further down the line).
+     */
     private static String resolveModrinthUrl(String originalUrl, String projectSlug, String versionIdentifier) {
         try {
             JsonObject versionJson = fetchModrinthVersionById(versionIdentifier);
 
             if (versionJson == null) {
-
+                // Not a valid version id; try resolving it as a
+                // version_number instead, by listing the project's versions.
                 versionJson = fetchModrinthVersionByNumber(projectSlug, versionIdentifier);
             }
 
@@ -221,7 +324,8 @@ public class ModDownloader {
                 return originalUrl;
             }
 
-
+            // Prefer the file marked as "primary"; if none is, use the
+            // first one in the list.
             JsonObject chosen = null;
             for (JsonElement fileElement : files) {
                 JsonObject fileObj = fileElement.getAsJsonObject();
@@ -247,14 +351,19 @@ public class ModDownloader {
         return originalUrl;
     }
 
-
+    /**
+     * Looks up a version directly by its real Modrinth id via
+     * GET /v2/version/{id}. Returns null (not an exception) if the
+     * identifier isn't a valid id (HTTP 400/404) so the caller can try the
+     * version_number fallback instead.
+     */
     private static JsonObject fetchModrinthVersionById(String versionId) throws IOException, InterruptedException {
         String apiUrl = "https://api.modrinth.com/v2/version/" + versionId;
 
         HttpRequest apiRequest = HttpRequest.newBuilder()
                 .uri(URI.create(apiUrl))
                 .timeout(Duration.ofSeconds(15))
-                .header("User-Agent", "ModpackDownloader/1.0 (Minecraft Forge 1.20.1)")
+                .header("User-Agent", "MDFM/1.0 (Minecraft Forge 1.20.1)")
                 .GET()
                 .build();
 
@@ -262,7 +371,7 @@ public class ModDownloader {
                 "Modrinth version lookup for " + versionId);
 
         if (apiResponse.statusCode() == 400 || apiResponse.statusCode() == 404) {
-
+            // Not a valid version id - likely a version_number instead.
             return null;
         }
         if (apiResponse.statusCode() != 200) {
@@ -273,7 +382,13 @@ public class ModDownloader {
         return JsonParser.parseString(apiResponse.body()).getAsJsonObject();
     }
 
-
+    /**
+     * Looks up a version by its human-readable version_number (e.g.
+     * "2.5.1+mc1.20.1") by listing all versions of the project and finding
+     * the one whose version_number matches. Needed because Modrinth's own
+     * website accepts version_number in page URLs, but /v2/version/{id}
+     * only accepts the real id.
+     */
     private static JsonObject fetchModrinthVersionByNumber(String projectSlug, String versionNumber)
             throws IOException, InterruptedException {
         String apiUrl = "https://api.modrinth.com/v2/project/" + projectSlug + "/version";
@@ -281,7 +396,7 @@ public class ModDownloader {
         HttpRequest apiRequest = HttpRequest.newBuilder()
                 .uri(URI.create(apiUrl))
                 .timeout(Duration.ofSeconds(15))
-                .header("User-Agent", "ModpackDownloader/1.0 (Minecraft Forge 1.20.1)")
+                .header("User-Agent", "MDFM/1.0 (Minecraft Forge 1.20.1)")
                 .GET()
                 .build();
 
@@ -305,6 +420,56 @@ public class ModDownloader {
 
         LOGGER.warn("No version with version_number '{}' found for Modrinth project '{}'.", versionNumber, projectSlug);
         return null;
+    }
+
+    /**
+     * Checks the downloaded file against whichever of entry.sha1 /
+     * entry.sha512 were provided in mods.json. Returns true if there was
+     * nothing to check, or everything provided matched; false (with a log
+     * explaining which one failed) otherwise.
+     */
+    private static boolean verifyExpectedHashes(ModEntry entry, Path file) {
+        if (entry.sha1 != null && !entry.sha1.isBlank()) {
+            if (!hashMatches(file, "SHA-1", entry.sha1)) {
+                LOGGER.warn("[{}] SHA-1 mismatch: the downloaded file does not match the hash configured in mods.json.",
+                        entry.fileName);
+                return false;
+            }
+        }
+        if (entry.sha512 != null && !entry.sha512.isBlank()) {
+            if (!hashMatches(file, "SHA-512", entry.sha512)) {
+                LOGGER.warn("[{}] SHA-512 mismatch: the downloaded file does not match the hash configured in mods.json.",
+                        entry.fileName);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean hashMatches(Path file, String algorithm, String expectedHex) {
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance(algorithm);
+            try (InputStream in = Files.newInputStream(file)) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    digest.update(buffer, 0, read);
+                }
+            }
+            String actualHex = bytesToHex(digest.digest());
+            return actualHex.equalsIgnoreCase(expectedHex.trim());
+        } catch (Exception e) {
+            LOGGER.warn("Could not compute {} hash for {}: {}", algorithm, file.getFileName(), e.toString());
+            return false;
+        }
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 
     private static boolean hasValidZipSignature(Path file) {

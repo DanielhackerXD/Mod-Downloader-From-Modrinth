@@ -20,7 +20,7 @@ public class DownloadPromptScreen extends Screen {
     private Component alertMessage = null;
     private int alertTicks = 0;
 
-
+    // Screen stages: choosing mods -> downloading -> finished (restart) / error
     private enum Stage { CHOOSING, DOWNLOADING, RESTART_REQUIRED, ERROR }
     private Stage stage = Stage.CHOOSING;
 
@@ -42,7 +42,9 @@ public class DownloadPromptScreen extends Screen {
 
         for (int i = 0; i < entries.size(); i++) {
             ModEntry entry = entries.get(i);
-
+            // The mod's name comes from the pack's mods.json, so it is not
+            // translatable via a lang file: it is shown exactly as the
+            // pack author wrote it.
             ModCheckbox box = new ModCheckbox(
                     left, top + i * rowHeight, listWidth, 20,
                     Component.literal(entry.name), entry
@@ -53,7 +55,10 @@ public class DownloadPromptScreen extends Screen {
 
         int buttonsY = top + entries.size() * rowHeight + 30;
 
-
+        // A single button whose behavior depends on the current stage
+        // (see onButtonPressed). We don't reassign Button.onPress because
+        // it's a protected field: instead, the creation lambda itself
+        // checks the current state every time it's pressed.
         nextButton = Button.builder(Component.translatable("screen.mdfm.next"), b -> onButtonPressed())
                 .bounds((this.width - 150) / 2, buttonsY, 150, 20)
                 .build();
@@ -71,7 +76,7 @@ public class DownloadPromptScreen extends Screen {
                 }
             }
             case ERROR -> startDownload();
-            case DOWNLOADING -> {  }
+            case DOWNLOADING -> { /* button is disabled, shouldn't be pressable */ }
         }
     }
 
@@ -93,7 +98,7 @@ public class DownloadPromptScreen extends Screen {
 
     private void showAlert(Component message) {
         this.alertMessage = message;
-        this.alertTicks = 100;
+        this.alertTicks = 100; // ~5 seconds at 20 ticks/sec
     }
 
     private void startDownload() {
@@ -103,7 +108,7 @@ public class DownloadPromptScreen extends Screen {
 
         ModDownloader.downloadAllAsync(
                 entries,
-                entry -> {  },
+                entry -> { /* progress update, the screen just repaints every frame */ },
                 failed -> {
                     this.failedEntries = failed;
                     if (failed.isEmpty()) {
@@ -176,7 +181,7 @@ public class DownloadPromptScreen extends Screen {
 
     @Override
     public boolean shouldCloseOnEsc() {
-
+        // This screen cannot be closed with Esc: it's mandatory.
         return false;
     }
 
@@ -185,7 +190,11 @@ public class DownloadPromptScreen extends Screen {
         return true;
     }
 
-
+    /**
+     * Custom checkbox: in 1.20.1 the Checkbox class has no static builder()
+     * and no onValueChange callback, so it has to be subclassed and
+     * onPress() overridden to find out when the state changes.
+     */
     private class ModCheckbox extends Checkbox {
         private final ModEntry entry;
 

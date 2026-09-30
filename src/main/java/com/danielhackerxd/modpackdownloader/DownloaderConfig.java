@@ -19,7 +19,10 @@ public class DownloaderConfig {
     private static final Path CONFIG_DIR = FMLPaths.CONFIGDIR.get().resolve("mdfm");
     private static final Path MODS_JSON = CONFIG_DIR.resolve("mods.json");
 
-
+    /**
+     * @return true if mods.json already existed before calling this method.
+     *         If it didn't exist, a sample template is created and false is returned.
+     */
     public static boolean configExists() {
         return Files.exists(MODS_JSON);
     }
@@ -48,7 +51,8 @@ public class DownloaderConfig {
                 GSON.toJson(template, writer);
             }
 
-
+            // Explanatory file next to the template, so it's clear that
+            // mods.json needs to be edited before distributing the modpack.
             Path readme = CONFIG_DIR.resolve("README.txt");
             String readmeText =
                     "MDFM (Mod Downloader From Modrinth)\n" +
@@ -61,9 +65,12 @@ public class DownloaderConfig {
                     "   - url: the mod's Modrinth download link. This can be a normal\n" +
                     "     Modrinth version page link (e.g. modrinth.com/mod/x/version/y),\n" +
                     "     which is automatically resolved to the real CDN download link\n" +
-                    "     via Modrinth's public API, or an already-direct .jar link\n" +
-                    "     (e.g. cdn.modrinth.com/...).\n" +
+                    "     via Modrinth's public API, or an already-direct link hosted on\n" +
+                    "     cdn.modrinth.com. For security reasons, ONLY modrinth.com and\n" +
+                    "     cdn.modrinth.com links are accepted - any other URL is refused.\n" +
                     "   - fileName: the file name it will be saved as in the mods/ folder.\n" +
+                    "   - sha1 / sha512 (optional): expected hash of the downloaded file.\n" +
+                    "     If provided, the download is rejected unless it matches exactly.\n" +
                     "2. Distribute the pack with this edited mods.json already included.\n" +
                     "3. On every launch, the mod checks whether those files already exist\n" +
                     "   in mods/. If any are missing, the warning screen is shown and the\n" +
