@@ -16,20 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/**
- * Extra safety net on top of the host allowlist in ModDownloader: cross-checks
- * a resolved download URL against the public StopModReposts database
- * (https://stopmodreposts.org), a community-maintained list of sites known to
- * illegally re-host mods. Since every download this mod performs is already
- * restricted to cdn.modrinth.com by the allowlist, this mostly guards against
- * the (very unlikely) case of that domain itself ever being flagged - but
- * checking it costs nothing and is good practice for anything that downloads
- * files on a player's behalf.
- *
- * Fails open: if the database can't be fetched (offline, API down, etc.),
- * downloads are allowed to proceed rather than being blocked by an
- * unrelated network hiccup.
- */
+
 public class RepostBlocklist {
 
     private static final Logger LOGGER = LogManager.getLogger("MDFM");
@@ -42,11 +29,7 @@ public class RepostBlocklist {
     private static volatile List<String> flaggedDomains = null;
     private static final Object LOAD_LOCK = new Object();
 
-    /**
-     * Returns true if the given URL's host matches (or is a subdomain of) a
-     * domain flagged in the StopModReposts database. Loads and caches the
-     * database on first use.
-     */
+
     public static boolean isFlagged(String url) {
         List<String> domains = getFlaggedDomains();
         if (domains.isEmpty()) {

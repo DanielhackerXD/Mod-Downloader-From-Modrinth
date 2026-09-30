@@ -19,10 +19,7 @@ public class DownloaderConfig {
     private static final Path CONFIG_DIR = FMLPaths.CONFIGDIR.get().resolve("mdfm");
     private static final Path MODS_JSON = CONFIG_DIR.resolve("mods.json");
 
-    /**
-     * @return true if mods.json already existed before calling this method.
-     *         If it didn't exist, a sample template is created and false is returned.
-     */
+
     public static boolean configExists() {
         return Files.exists(MODS_JSON);
     }
@@ -51,8 +48,6 @@ public class DownloaderConfig {
                 GSON.toJson(template, writer);
             }
 
-            // Explanatory file next to the template, so it's clear that
-            // mods.json needs to be edited before distributing the modpack.
             Path readme = CONFIG_DIR.resolve("README.txt");
             String readmeText =
                     "MDFM (Mod Downloader From Modrinth)\n" +
